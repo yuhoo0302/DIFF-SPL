@@ -4,7 +4,7 @@ This repository is the implementation of the diffusion-based approach for standa
 
 
 ## Usage  
-### Dataset Setting
+### Dataset
 The data folders should be placed as following:  
 ```
 -- datasets  
