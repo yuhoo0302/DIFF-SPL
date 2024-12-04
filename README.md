@@ -7,17 +7,19 @@ This repository is the implementation of the diffusion-based approach for standa
 ### Dataset
 The data folders should be placed as following:  
 ```
--- datasets  
-   ---case 1  
-      ---volume.nii.gz   # the ultrasound volume  
-      ---tangent.npz  # include the information for the GT plane parameters
-   ---case 2  
+-- datasets
+   ---organ1 
+      ---case 1  
+         ---volume.nii.gz   # the ultrasound volume  
+         ---tangent.npz  # include the information for the GT plane parameters
+      ---case 2  
       ...
 
 -- datasplit
-  --- train.txt # case name list for training
-  --- val.txt # case name list for validation
-  --- test.txt # case name list for testing
+  ---organ1 
+     --- train.txt # case name list for training
+     --- val.txt # case name list for validation
+     --- test.txt # case name list for testing
 ```
 
 ### Training
