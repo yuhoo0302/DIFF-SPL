@@ -1,0 +1,37 @@
+# Initial Configuration
+GPUId: 3
+Seed: 1307
+
+# Path
+DataSplitPath: ./datasplit # txt files, train.txt, val.txt, test.txt
+DataPath: ./datasets 
+SavePath: ./checkpoints
+
+
+DataSetType: xxxx
+PlaneSize: 224
+
+# Network Configuration
+ModelType: SPLDiffusionModel
+DiffusionConfig:
+  Scheduler: squaredcos_cap_v2 # linear, squaredcos_cap_v2
+  BetaStart: 1.0E-4
+  BetaEnd: 0.02
+  TrainTimeSteps: 1000
+  InferenceSteps: 100
+DenoiseConfig:
+  - 1
+
+LossWeight:
+  NoiseScore: 1
+
+# Optimization Configuration
+LearningRate: 5.0E-4 
+WeightDecay: 4.0E-5
+InitWeight: null
+BatchSize: 8 
+NumIterations: 1000000
+
+# Validation Configuration
+ValFreq: 2000
+EfficientSave: False
