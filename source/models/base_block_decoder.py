@@ -2,7 +2,10 @@ import os
 import math
 import torch
 import torch.nn as nn
-from torchvision.models import resnet18
+from torchvision.models import resnet18, resnet50, resnet101
+
+import ipdb
+import timm
 
 class BaseModule(nn.Module):
     def __init__(self):
@@ -39,6 +42,7 @@ class BaseModule(nn.Module):
 class PlaneFeatExtractor(nn.Module):
     def __init__(self):
         super(PlaneFeatExtractor, self).__init__()
+        # net = resnet50()
         net = resnet18()
         net.conv1 = nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)
         net = list(net.children())
@@ -48,6 +52,7 @@ class PlaneFeatExtractor(nn.Module):
         self.layer3 = net[6]
         self.layer4 = net[7]
 
+
     def forward(self, x):
         layer0 = self.layer0(x)
         layer1 = self.layer1(layer0)
@@ -55,6 +60,32 @@ class PlaneFeatExtractor(nn.Module):
         layer3 = self.layer3(layer2)
         layer4 = self.layer4(layer3)
         return layer4
+
+
+
+class PlaneFeatExtractor_trans(nn.Module):
+    def __init__(self):
+        super(PlaneFeatExtractor_trans, self).__init__()
+        net = timm.create_model('swin_base_patch4_window7_224', pretrained=True, drop_path_rate = 0.2)
+        self.net = list(net.children())
+        self.layer0 = self.net[0]
+        self.layer1 = self.net[1]
+        self.layer2 = self.net[2]
+
+        # self.layer0 = nn.Sequential(*net[:3])
+        # self.layer1 = nn.Sequential(*net[3:5])
+        # self.layer2 = net[5]
+        # self.layer3 = net[6]
+        # self.layer4 = net[7]
+
+    def forward(self, x):
+        x0 = torch.cat([x,x,x],1)
+        layer0 = self.layer0(x0)
+        # ipdb.set_trace()
+        layer1 = self.layer1(layer0)
+        layer2 = self.layer2(layer1)
+        return layer2
+
 
 
 def conv_block(in_dim, out_dim):
@@ -94,6 +125,35 @@ class ImageDecoder(nn.Module):
         x = self.up(x)
         x = self.out(x)
         return torch.sigmoid(x)
+
+class VolumeFeatExtractor(nn.Module):
+    def __init__(self):
+        super(VolumeFeatExtractor, self).__init__()
+        self.layer1 = self.make_layer(1, 16)
+        self.layer2 = self.make_layer(16, 32)
+        self.layer3 = self.make_layer(32, 32)
+        self.layer4 = self.make_layer(32, 32)
+        self.layer5 = self.make_layer(32, 32)
+        self.pool = nn.AdaptiveAvgPool3d(output_size=1)
+
+    @staticmethod
+    def make_layer(in_chan, out_chan, ksize=3, stride=2, padding=1, bias=True):
+        return nn.Sequential(
+            nn.Conv3d(in_chan, out_chan, kernel_size=ksize, stride=stride, padding=padding, bias=bias),
+            nn.InstanceNorm3d(out_chan),
+            nn.LeakyReLU(out_chan),
+        )
+
+    def forward(self, x):
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.layer4(x)
+        x = self.layer5(x)
+        x = self.pool(x)
+        return x
+
+
 
 
 class TemporalResBlock(nn.Module):
@@ -155,12 +215,19 @@ class DenoiseUNet(BaseModule):
             nn.Conv2d(16, 64, 1),
             nn.Conv2d(64, 64, 1)
         )
-
+        
         self.plane_enc = nn.Sequential(
             nn.Conv2d(512, 512, kernel_size=7),
             nn.GroupNorm(32, 512),
             nn.ReLU(),
             nn.Conv2d(512, 96, kernel_size=1),
+        )
+        
+        self.vol_enc = nn.Sequential(
+            nn.Conv2d(32, 32, kernel_size=1),
+            nn.GroupNorm(8, 32),
+            nn.ReLU(),
+            nn.Conv2d(32, 32, kernel_size=1)
         )
 
         self.tangent_enc = nn.Sequential(
@@ -173,7 +240,7 @@ class DenoiseUNet(BaseModule):
 
         self.image_decoder = ImageDecoder()
 
-        self.enc0 = nn.Conv2d(128, 128, kernel_size=1)
+        self.enc0 = nn.Conv2d(160, 128, kernel_size=1)
 
         self.enc1 = TemporalResBlock(128, 256, 64)
         self.enc2 = TemporalResBlock(256, 512, 64)
@@ -187,15 +254,19 @@ class DenoiseUNet(BaseModule):
             nn.Conv2d(32, 3, 1, bias=False)
         )
 
-    def forward(self, x, plane_feat, time_feat):
+    def forward(self, x, plane_feat, volume_feat, time_feat):
+        
         plane_feat = self.plane_enc(plane_feat)
+        """encode the volume"""
+        volume_feat = self.vol_enc(volume_feat)
+
 
         time_feat = self.time_embedding(time_feat)
         time_feat = self.time_mlp(time_feat.unsqueeze(-1).unsqueeze(-1))
 
         enc_x = self.tangent_enc(x.unsqueeze(-1).unsqueeze(-1))
 
-        x_in = torch.cat([plane_feat, enc_x], dim=1)
+        x_in = torch.cat([volume_feat, plane_feat, enc_x], dim=1)
 
         enc0 = self.enc0(x_in)
 
@@ -208,7 +279,8 @@ class DenoiseUNet(BaseModule):
         dec1 = self.dec1(torch.cat([dec2, enc1], dim=1), time_feat)
 
         dec0 = self.dec0(dec1)
-
+        ipdb.set_trace()
         recon_img = self.image_decoder(plane_feat)
 
         return {'PredNoise': dec0, 'ReconImage': recon_img}
+

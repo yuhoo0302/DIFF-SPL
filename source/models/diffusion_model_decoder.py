@@ -20,7 +20,7 @@ class SPLDiffusionModel(bb.BaseModule):
         super(SPLDiffusionModel, self).__init__()
 
         self.feat_extractor = bb.PlaneFeatExtractor()
-
+        self.vol_feat_extractor = bb.VolumeFeatExtractor()
         # freeze the feature extractor [optional]
         # for param in self.feat_extractor.parameters():
         #     param.requires_grad = False
@@ -45,7 +45,8 @@ class SPLDiffusionModel(bb.BaseModule):
 
         # This factor is for the
         self.normalize_factor = torch.nn.Parameter(
-            torch.FloatTensor(np.asarray([1, 1, 10])).unsqueeze(0), requires_grad=False)
+            torch.FloatTensor(np.asarray([math.pi, math.pi, 10])).unsqueeze(0), requires_grad=False)
+
 
     def forward(self, tangent, slicer, bsize):
 
@@ -64,7 +65,6 @@ class SPLDiffusionModel(bb.BaseModule):
         noisy_tangent = self.noise_scheduler.add_noise(tangent, noise, time_step)
 
         rescaled_noisy_tangent = noisy_tangent * self.normalize_factor
-        rescaled_noisy_tangent[:, :2] = torch.clamp(rescaled_noisy_tangent[:, :2], min=-math.pi, max=math.pi)
         rescaled_noisy_tangent = sph2cart_tensor(rescaled_noisy_tangent)
 
         noisy_plane_param = batch_tangent2plane(rescaled_noisy_tangent, None)
@@ -73,18 +73,25 @@ class SPLDiffusionModel(bb.BaseModule):
 
         plane_feats = self.feat_extractor(sliced_planes.unsqueeze(1))
 
-        noise_pred = self.denoise_net(noisy_tangent, plane_feats, time_step)
+        volume = slicer.im / 255    
 
-        fwd = {'Noise': noise, 'PredNoise': noise_pred}
+        vol_feats = self.vol_feat_extractor(volume.unsqueeze(0).unsqueeze(0)).squeeze(-1)
+        vol_feats = vol_feats.repeat(bsize, 1, 1, 1)
+        
+        fwd = self.denoise_net(noisy_tangent, plane_feats, vol_feats, time_step)
+
+        fwd['Noise'] = noise
+        fwd['GTImage'] = sliced_planes
 
         return fwd
 
     def loss_func(self, fwd):
         noise_score = F.mse_loss(fwd['PredNoise'].squeeze(), fwd['Noise'].squeeze())
+        image_recon = F.mse_loss(fwd['ReconImage'].squeeze(), fwd['GTImage'].squeeze())
 
-        loss_total = noise_score
-        loss_info = {'NoiseScore': noise_score.item()}
-        print_info = f'NoiseScore: {noise_score.item():.5f} '
+        loss_total = noise_score + image_recon
+        loss_info = {'NoiseScore': noise_score.item(), 'ImageRecon': image_recon.item()}
+        print_info = f'NoiseScore: {noise_score.item():.5f} ImageRecon: {image_recon.item():.5f} '
 
         return loss_total, loss_info, print_info
 
@@ -103,7 +110,6 @@ class SPLDiffusionModel(bb.BaseModule):
         noisy_tangent = self.noise_scheduler.add_noise(tangent, noise, time_step)
 
         rescaled_noisy_tangent = noisy_tangent * self.normalize_factor
-        rescaled_noisy_tangent[:, :2] = torch.clamp(rescaled_noisy_tangent[:, :2], min=-math.pi, max=math.pi)
         rescaled_noisy_tangent = sph2cart_tensor(rescaled_noisy_tangent)
 
         noisy_plane_param = batch_tangent2plane(rescaled_noisy_tangent, None)
@@ -111,36 +117,46 @@ class SPLDiffusionModel(bb.BaseModule):
         sliced_planes = slicer.slice(noisy_plane_param)
         plane_feats = self.feat_extractor(sliced_planes.unsqueeze(1))
 
+        
+        volume = slicer.im / 255
+
+        vol_feats = self.vol_feat_extractor(volume.unsqueeze(0).unsqueeze(0)).squeeze(-1)
+        vol_feats = vol_feats.repeat(bsize, 1, 1, 1)
+
         for t in self.noise_scheduler.timesteps:
 
-            pred_noise = self.denoise_net(noisy_tangent, plane_feats, t.float().expand(bsize,).to(self.model_device))
-            out = self.noise_scheduler.step(pred_noise.squeeze(-1).squeeze(-1), t, noisy_tangent)
+            pred_noise = self.denoise_net(noisy_tangent, plane_feats, vol_feats, t.float().expand(bsize,).to(self.model_device))
+            out = self.noise_scheduler.step(pred_noise['PredNoise'].squeeze(-1).squeeze(-1), t, noisy_tangent)
             noisy_tangent = out.prev_sample
 
             rescaled_noisy_tangent = noisy_tangent * self.normalize_factor
-            rescaled_noisy_tangent[:, :2] = torch.clamp(rescaled_noisy_tangent[:, :2], min=-math.pi, max=math.pi)
             rescaled_noisy_tangent = sph2cart_tensor(rescaled_noisy_tangent)
 
             noisy_plane_param = batch_tangent2plane(rescaled_noisy_tangent, None)
-            sliced_planes = slicer.slice(noisy_plane_param)
+
             plane_feats = self.feat_extractor(sliced_planes.unsqueeze(1))
 
+        # ipdb.set_trace()
+        import copy
         tangent = tangent * self.normalize_factor
+        tangent_sph = copy.deepcopy(tangent)
         tangent = sph2cart_tensor(tangent)
 
         noisy_tangent = noisy_tangent * self.normalize_factor
-        noisy_tangent[:, :2] = torch.clamp(noisy_tangent[:, :2], min=-math.pi, max=math.pi)
+        noisy_tangent_sph = copy.deepcopy(noisy_tangent)
         noisy_tangent = sph2cart_tensor(noisy_tangent)
 
         tangent_error = torch.linalg.norm(tangent - noisy_tangent, dim=-1).mean().item()
 
         noisy_plane_param = batch_tangent2plane(noisy_tangent)
         plane_param = batch_tangent2plane(tangent)
-
+        # ipdb.set_trace()
         cosine = torch.cosine_similarity(plane_param[:, :3], noisy_plane_param[:, :3], dim=1)
+        cosine[cosine>1] = 1
+        cosine[cosine<-1] = -1
+        
         angle = torch.arccos(torch.abs(cosine)).mean().item() * 180 / math.pi
         distance = torch.abs(plane_param[:, 3:] - noisy_plane_param[:, 3:]).mean().item()
-
+        
         return {'TangentDistance': tangent_error, 'Angle': angle, 'Distance': distance}
-
         # return {'TangentDistance': tangent_error, 'Angle': angle, 'Distance': distance, 'gt':plane_param, 'pred':noisy_plane_param, 'slice':slice_list, 'gt_tangent':tangent_sph , 'pred_tangent':noisy_tangent_sph}
